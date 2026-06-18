@@ -15,12 +15,16 @@
  *
  * Exit code 0 = all good. Exit code 1 = at least one violation.
  */
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import {
+  walk,
+  effectiveMtime,
+  commitTimesUnder,
+  newestEffectiveMtime,
+  root,
+} from './lib/git-mtime.mjs';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const root = join(here, '..');
 const packagesDir = join(root, 'packages');
 const skillsDir = join(root, 'packages', 'skills', '.agents', 'skills');
 
@@ -33,37 +37,6 @@ function fail(pkg, msg) {
 
 function ok(pkg, msg) {
   console.log(`  OK:   ${msg}`);
-}
-
-/* -------------------- helpers -------------------- */
-
-async function* walk(dir) {
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return; // dir does not exist
-  }
-  for (const e of entries) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) {
-      if (e.name === 'node_modules' || e.name === 'dist' || e.name === '.git') continue;
-      yield* walk(p);
-    } else {
-      yield p;
-    }
-  }
-}
-
-async function newestMtime(files) {
-  let max = 0;
-  for (const f of files) {
-    try {
-      const s = await stat(f);
-      if (s.mtimeMs > max) max = s.mtimeMs;
-    } catch {}
-  }
-  return max;
 }
 
 /* Extract all `export` symbols from a TS file by a simple text scan. */
@@ -186,13 +159,14 @@ async function checkPackage(pkgPath, pkgName) {
     return;
   }
 
-  // 2. mtime gate
+  // 2. mtime gate (issue #11: git-aware, see helpers above)
   const srcFiles = [];
   for await (const f of walk(join(pkgPath, 'src'))) srcFiles.push(f);
   if (srcFiles.length > 0) {
-    const newest = await newestMtime(srcFiles);
-    const specStat = await stat(specPath);
-    if (specStat.mtimeMs < newest) {
+    const combined = await commitTimesUnder(pkgPath);
+    const newest = await newestEffectiveMtime(srcFiles, combined);
+    const specT = await effectiveMtime(specPath, combined);
+    if (specT < newest) {
       fail(pkgName, `specs/SPEC.md is older than the newest src/ change`);
     } else {
       ok(pkgName, `specs/SPEC.md is fresh`);
